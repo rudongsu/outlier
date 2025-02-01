@@ -6,6 +6,8 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import random
 import time
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail
 
 # Load environment variables from .env file
 load_dotenv()
@@ -14,34 +16,28 @@ load_dotenv()
 LOGIN_URL = "https://app.outlier.ai/internal/loginNext/expert?redirect_url=marketplace"
 API_URL = "https://app.outlier.ai/internal/user-projects/{user_id}/credentialedProjects"
 
-# Get credentials from environment variables
+# from environment variables
 EMAIL = os.getenv("EMAIL")
+SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 PASSWORD = os.getenv("PASSWORD")
-FROM_EMAIL = os.getenv("FROM_EMAIL")  # Email to send notifications from
-FROM_PASSWORD = os.getenv("FROM_PASSWORD")  # Email password
-TO_EMAIL = os.getenv("TO_EMAIL")  # Email to receive notifications
-USER_ID = os.getenv("USER_ID")  # Your user account ID
+FROM_EMAIL = os.getenv("FROM_EMAIL")
+TO_EMAIL = os.getenv("TO_EMAIL")
+USER_ID = os.getenv("USER_ID")
 
 def send_email(subject, body):
-    """Send an email notification."""
+    """Send an email notification using SendGrid."""
+    message = Mail(
+        from_email=FROM_EMAIL,
+        to_emails=TO_EMAIL,
+        subject=subject,
+        plain_text_content=body)
     try:
-        # Create the email message
-        msg = MIMEMultipart()
-        msg["From"] = FROM_EMAIL
-        msg["To"] = TO_EMAIL
-        msg["Subject"] = subject
-
-        # Attach the email body
-        msg.attach(MIMEText(body, "plain"))
-
-        # Connect to the SMTP server and send the email
-        with smtplib.SMTP("smtp.gmail.com", 587) as server:
-            server.starttls()  # Secure the connection
-            server.login(FROM_EMAIL, FROM_PASSWORD)
-            server.send_message(msg)
+        sg = SendGridAPIClient(SENDGRID_API_KEY)
+        response = sg.send(message)
         print("Email sent successfully!")
+        print(response.status_code)
     except Exception as e:
-        print("Failed to send email:", e)
+        print("Failed to send email:", e.message)
 
 def check_projects():
     """Check the credentialedProjects API for available projects."""
@@ -93,6 +89,8 @@ def check_projects():
                 body = f"There are {data['total']} projects available on Outlier Marketplace. Check it out!"
                 send_email(subject, body)
             else:
+                subject = "Projects Unavailable"
+                body = f"Sorry, There are {data['total']} projects available."
                 print("checking projects...", data)
                 print("No projects available.")
         else:
