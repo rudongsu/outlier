@@ -53,8 +53,9 @@ def check_marketplace(session, headers):
     # Update headers specifically for marketplace request
     marketplace_headers = headers.copy()
     marketplace_headers.update({
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Encoding": "br",  # Only accept Brotli compression
+        "Accept": "application/json",
+        "Accept-Encoding": "gzip, deflate, br",  # Change from just "br"
+        "Content-Type": "application/json",
         "sec-ch-ua-mobile": "?0",
         "sec-ch-ua-platform": '"Windows"',
         "Sec-Fetch-Site": "same-origin",
@@ -62,7 +63,7 @@ def check_marketplace(session, headers):
         "Sec-Fetch-Dest": "empty",
         "Referer": "https://app.outlier.ai/internal/experts/project/marketplace",
         "Origin": "https://app.outlier.ai",
-        "x-csrf-token": session.cookies.get('_csrf')  # Add CSRF token here
+        "x-csrf-token": session.cookies.get('_csrf')
     })
 
     # print("Using CSRF token:", session.cookies.get('_csrf'))  # Debug print
@@ -82,13 +83,15 @@ def check_marketplace(session, headers):
         
         # Debug prints
         print("Request URL:", response.url)
-        # print("Request headers sent:", marketplace_headers)
         print("Response status:", response.status_code)
-        # print("Response headers:", dict(response.headers))
+        print("Raw response content:", response.text[:200])  # Add this line
 
         if response.status_code == 200:
             try:
-                # Let requests handle decompression automatically
+                if not response.text:
+                    print("Empty response received")
+                    return
+                    
                 data = response.json()
                 print("Successfully parsed JSON response")
                 
@@ -163,12 +166,12 @@ def check_projects():
         print("Login successful!")
         csrf_token = session.cookies.get('_csrf')
         
+        # Increase delay to ensure session is properly established
+        time.sleep(random.uniform(3, 5)) 
+
         # Print cookies and CSRF token for debugging
         # print("Cookies:", session.cookies.get_dict())
         # print("CSRF Token:", csrf_token)
-
-        # Introduce a random delay to mimic human behavior
-        time.sleep(random.uniform(1, 3))
 
         # Update headers with CSRF token and additional required headers
         headers.update({
@@ -194,7 +197,7 @@ def run_schedule():
 
 if __name__ == "__main__":
     # Schedule check_projects to run every minute
-    schedule.every(1).minutes.do(check_projects)
+    schedule.every(2).minutes.do(check_projects)
 
     # Start the scheduler in a separate thread
     scheduler_thread = threading.Thread(target=run_schedule)
