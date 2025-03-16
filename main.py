@@ -1,15 +1,18 @@
 from dotenv import load_dotenv
 import os
+import json  # Add this line
 import requests
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import random
-import time
+from time import sleep
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
 import schedule
 import threading
 import sys
+import signal
+from datetime import datetime, time as datetime_time, timedelta  # Add timedelta here too
 
 # Project names to monitor
 MONITORED_PROJECTS = [
@@ -23,6 +26,7 @@ load_dotenv()
 # Define URLs
 LOGIN_URL = "https://app.outlier.ai/internal/loginNext/expert?redirect_url=marketplace"
 MARKETPLACE_URL = "https://app.outlier.ai/internal/experts/project/marketplace/history"
+REMAINING_TASKS_URL = "https://app.outlier.ai/internal/user-projects/bulk-remaining-tasks"
 
 # from environment variables
 EMAIL = os.getenv("EMAIL")
@@ -31,8 +35,141 @@ PASSWORD = os.getenv("PASSWORD")
 FROM_EMAIL = os.getenv("FROM_EMAIL")
 TO_EMAIL = os.getenv("TO_EMAIL")
 
+
 # Create SendGrid client instance
 sg_client = SendGridAPIClient(SENDGRID_API_KEY)
+
+WORK_HOURS_START = datetime_time(9, 0)  # 9:00 AM ACST
+WORK_HOURS_END = datetime_time(17, 30)  # 5:30 PM ACST
+NIGHT_HOURS_END = datetime_time(23, 59)  # 11:59 PM ACST
+EMAIL_COOLDOWN_MINUTES = 60  # Send emails every hour during allowed hours
+LAST_EMAIL_SENT = {}  # Track last email time per project
+
+def should_send_email():
+    """Check if we should send an email based on time of day."""
+    now = datetime.now()
+    current_time = now.time()
+    
+    # Don't send emails on weekends
+    if now.weekday() >= 5:  # 5 = Saturday, 6 = Sunday
+        return False
+        
+    # Don't send during work hours
+    if WORK_HOURS_START <= current_time <= WORK_HOURS_END:
+        return False
+        
+    # Only send between work hours end and night hours end
+    if WORK_HOURS_END <= current_time <= NIGHT_HOURS_END:
+        # Check cooldown period
+        for project_id, last_sent in LAST_EMAIL_SENT.items():
+            if (now - last_sent).total_seconds() < EMAIL_COOLDOWN_MINUTES * 60:
+                print(f"Email cooldown active until {last_sent + timedelta(minutes=EMAIL_COOLDOWN_MINUTES)}")
+                return False
+        return True
+        
+    return False
+
+def load_project_ids():
+    """Load project IDs from projects.json file."""
+    try:
+        with open('projects.json', 'r') as f:
+            projects = json.load(f)
+            return list(projects.keys()), projects
+    except Exception as e:
+        print(f"Error loading projects.json: {e}")
+        return [], {}
+
+def check_remaining_tasks(session, headers):
+    # Load current projects
+    project_ids, project_map = load_project_ids()
+    
+    tasks_headers = headers.copy()
+    tasks_headers.update({
+        "Accept": "application/json",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Content-Type": "application/json",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Dest": "empty",
+        "Referer": "https://app.outlier.ai/internal/experts/project/marketplace",
+        "Origin": "https://app.outlier.ai",
+        "x-csrf-token": session.cookies.get('_csrf')
+    })
+    
+
+    payload = {
+        "projectIds": project_ids
+    }
+
+    try:
+        response = session.post(
+            REMAINING_TASKS_URL,
+            json=payload,
+            headers=tasks_headers
+        )
+        
+        print("Request URL:", response.url)
+        print("Response status:", response.status_code)
+        print("Raw response content:", response.text[:200])
+
+        if response.status_code == 200:
+            try:
+                if not response.text:
+                    print("Empty response received")
+                    return
+                    
+                data = response.json()
+                print("Successfully parsed JSON response")
+                
+                # Update web interface with new counts
+                try:
+                    update_url = os.getenv('WEB_APP_URL', 'http://localhost:5000') + '/update_counts'
+                    requests.post(update_url, json=data)
+                    print("Successfully updated web interface")
+                except Exception as e:
+                    print(f"Failed to update web interface: {e}")
+
+                # Check for projects with remaining tasks
+                projects_with_tasks = [
+                    project for project in data
+                    if project["count"] > 0
+                ]
+                
+                if projects_with_tasks:
+                    if should_send_email():
+                        projects_info = "\n".join([
+                            f"Project: {project_map[p['projectId']]['name']}\n"
+                            f"Project ID: {p['projectId']}\n"
+                            f"Remaining Tasks: {p['count']}\n"
+                            for p in projects_with_tasks
+                        ])
+                        
+                        subject = "Projects With Remaining Tasks Available!"
+                        body = f"Found {len(projects_with_tasks)} projects with tasks:\n\n{projects_info}"
+                        send_email(subject, body)
+                        
+                        # Update last email sent time for all projects
+                        now = datetime.now()
+                        for project in projects_with_tasks:
+                            LAST_EMAIL_SENT[project['projectId']] = now
+                            
+                        print(f"Found {len(projects_with_tasks)} projects with tasks and sent email notification!")
+                    else:
+                        print("Found projects with tasks but outside email notification hours")
+                else:
+                    print("No projects with remaining tasks.")
+                    
+            except requests.exceptions.JSONDecodeError as e:
+                print(f"Failed to parse JSON response: {str(e)}")
+                print("Status code:", response.status_code)
+                print("Response headers:", dict(response.headers))
+                print("Raw response content:", response.content[:200].hex())
+        else:
+            print(f"Failed to access remaining tasks endpoint: {response.status_code}")
+            print("Headers:", dict(response.headers))
+            print("Response:", response.text)
+    except requests.exceptions.RequestException as e:
+        print(f"Request failed: {str(e)}")
 
 def send_email(subject, body):
     """Send an email notification using SendGrid."""
@@ -114,7 +251,6 @@ def check_marketplace(session, headers):
                     send_email(subject, body)
                     print(f"Found {len(found_projects)} monitored projects! Exiting...")
                     # Exit the program after sending email
-                    sys.exit(0)
                 else:
                     print("No monitored projects available.")
                     
@@ -167,7 +303,7 @@ def check_projects():
         csrf_token = session.cookies.get('_csrf')
         
         # Increase delay to ensure session is properly established
-        time.sleep(random.uniform(3, 5)) 
+        sleep(random.uniform(3, 5)) 
 
         # Print cookies and CSRF token for debugging
         # print("Cookies:", session.cookies.get_dict())
@@ -181,27 +317,58 @@ def check_projects():
         })
         
         # Print final headers for debugging
-        print("Request headers:", headers)
+        # print("Request headers:", headers)
 
-        # Check marketplace
-        check_marketplace(session, headers)
+        # check_marketplace(session, headers)
+        check_remaining_tasks(session, headers)
     else:
         print(f"Login failed with status code {login_response.status_code}. Check your credentials.")
         print("Response:", login_response.text)
 
+running = True
+
+def signal_handler(signum, frame):
+    """Handle shutdown signals gracefully."""
+    global running
+    print(f"Received signal {signum}. Shutting down gracefully...")
+    running = False
+
 def run_schedule():
     """Run the schedule in a separate thread."""
-    while True:
+    global running
+    while running:
         schedule.run_pending()
-        time.sleep(1)
+        sleep(1)  # Change this line
 
 if __name__ == "__main__":
-    # Schedule check_projects to run every minute
-    schedule.every(2).minutes.do(check_projects)
+    # Register signal handlers
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
 
-    # Start the scheduler in a separate thread
-    scheduler_thread = threading.Thread(target=run_schedule)
-    scheduler_thread.start()
+    # Fix the time formatting
+    start_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    print(f"Starting scheduler at {start_time}")
+    
+    try:
+        # Schedule check_projects to run every 2 minutes
+        schedule.every(2).minutes.do(check_projects)
 
-    # Run check_projects immediately
-    check_projects()
+        # Start the scheduler in a separate thread
+        scheduler_thread = threading.Thread(target=run_schedule)
+        scheduler_thread.daemon = True
+        scheduler_thread.start()
+
+        # Run check_projects immediately on startup
+        check_projects()
+
+        # Keep main thread alive
+        while running:
+            sleep(1)  # Change this line
+
+    except Exception as e:
+        print(f"Error in main thread: {str(e)}")
+    finally:
+        print("Shutting down...")
+        running = False
+        scheduler_thread.join(timeout=5)
+        print("Shutdown complete")
